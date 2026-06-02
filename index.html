@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ExpertHub">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>Expert Hub</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #0d1117; font-family: 'Courier New', monospace; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0d1117; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+    textarea:focus, input:focus { outline: none !important; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:none; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes slideUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── Constants ────────────────────────────────────────────────
+    const COLORS = ["#22c55e","#3b82f6","#a855f7","#f59e0b","#ef4444","#06b6d4","#f97316","#ec4899"];
+    const ICONS  = ["◉","⬡","◈","✦","▲","⬟","◆","●"];
+
+    const DEFAULTS = [
+      { id:"p1", name:"汎用アシスタント", icon:"◉", color:"#22c55e", shortcut:"ctrl+1",
+        systemPrompt:"あなたは優秀な汎用アシスタントです。ユーザーの質問に丁寧かつ正確に答えてください。", knowledge:"" },
+      { id:"p2", name:"コードレビュアー", icon:"⬡", color:"#3b82f6", shortcut:"ctrl+2",
+        systemPrompt:"あなたは熟練したソフトウェアエンジニアです。コードのレビュー・バグ発見・改善提案を行います。問題点は具体的に指摘してください。", knowledge:"" },
+      { id:"p3", name:"壁打ち相手", icon:"◈", color:"#a855f7", shortcut:"ctrl+3",
+        systemPrompt:"あなたはビジネスの壁打ち相手です。アイデアに対して客観的な視点で質問を1つだけ返し、思考を深める手助けをします。答えを出すより問いを深めることを優先してください。", knowledge:"" },
+    ];
+
+    // ── Storage helpers (localStorage) ──────────────────────────
+    const store = {
+      get: (key) => { try { return localStorage.getItem(key); } catch { return null; } },
+      set: (key, val) => { try { localStorage.setItem(key, val); } catch {} },
+    };
+
+    // ── API call ─────────────────────────────────────────────────
+    async function callLLM(apiKey, system, messages) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true"
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1024,
+          system,
+          messages
+        })
+      });
+      const d = await res.json();
+      if (d.error) throw new Error(d.error.message);
+      return d.content[0]?.text || "";
+    }
+
+    // ── Shared styles ────────────────────────────────────────────
+    const S = {
+      field: { width:"100%", background:"#0d1117", border:"1px solid #30363d", color:"#c9d1d9",
+               padding:"7px 10px", borderRadius:"3px", fontSize:"13px" },
+      label: { fontSize:"11px", color:"#8b949e", display:"block", marginBottom:"4px" },
+      btn: (color="#1f6feb") => ({
+        background: color, border:"none", color:"#fff",
+        padding:"9px 16px", borderRadius:"3px", cursor:"pointer",
+        fontSize:"12px", fontFamily:"monospace", fontWeight:"bold", width:"100%"
+      }),
+    };
+
+    // ── Modal ────────────────────────────────────────────────────
+    function Modal({ title, onClose, children }) {
+      return (
+        <div onClick={e => e.target===e.currentTarget && onClose()}
+          style={{ position:"fixed",inset:0,background:"#000000bb",display:"flex",
+                   alignItems:"center",justifyContent:"center",zIndex:200,padding:"12px" }}>
+          <div style={{ background:"#161b22",border:"1px solid #30363d",borderRadius:"6px",
+                        padding:"20px",width:"100%",maxWidth:"440px",maxHeight:"88vh",overflowY:"auto",
+                        animation:"slideUp 0.2s ease" }}>
+            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px" }}>
+              <span style={{ fontSize:"13px",fontWeight:"bold",letterSpacing:"0.08em",color:"#c9d1d9" }}>{title}</span>
+              <button onClick={onClose} style={{ background:"none",border:"none",color:"#484f58",
+                                                  cursor:"pointer",fontSize:"18px",lineHeight:1 }}>✕</button>
+            </div>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    // ── SettingsModal ────────────────────────────────────────────
+    function SettingsModal({ apiKey, onSave, onClose }) {
+      const [k, setK] = useState(apiKey);
+      return (
+        <Modal title="⚙ 設定" onClose={onClose}>
+          <div style={{ display:"flex",flexDirection:"column",gap:"14px" }}>
+            <div>
+              <label style={S.label}>Anthropic API キー</label>
+              <input type="password" value={k} onChange={e=>setK(e.target.value)}
+                placeholder="sk-ant-..."
+                style={{...S.field, fontFamily:"monospace"}}/>
+              <div style={{ fontSize:"10px",color:"#484f58",marginTop:"5px",lineHeight:1.5 }}>
+                キーはこのデバイスの localStorage にのみ保存されます。<br/>
+                他のLLM（OpenAI / Gemini 等）は今後対応予定です。
+              </div>
+            </div>
+            <div style={{ background:"#0d1117",border:"1px solid #21262d",borderRadius:"3px",padding:"10px" }}>
+              <div style={{ fontSize:"11px",color:"#8b949e",marginBottom:"6px" }}>APIキーの取得方法</div>
+              <div style={{ fontSize:"11px",color:"#484f58",lineHeight:1.6 }}>
+                1. console.anthropic.com にアクセス<br/>
+                2. API Keys → Create Key<br/>
+                3. 発行されたキーをここに貼り付け
+              </div>
+            </div>
+            <button onClick={()=>onSave(k)} style={S.btn()}>保存して閉じる</button>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── ProjectModal ─────────────────────────────────────────────
+    function ProjectModal({ project, usedShortcuts, onSave, onDelete, onClose }) {
+      const nextKey = () => {
+        for (let i=1; i<=9; i++) {
+          if (!usedShortcuts.includes(`ctrl+${i}`)) return `ctrl+${i}`;
+        }
+        return "ctrl+?";
+      };
+      const [f, setF] = useState(project || {
+        name:"", icon:"◉", color:"#22c55e", shortcut:nextKey(), systemPrompt:"", knowledge:""
+      });
+      const s = (k,v) => setF(p=>({...p,[k]:v}));
+
+      return (
+        <Modal title={project ? "専門家を編集" : "+ 専門家を追加"} onClose={onClose}>
+          <div style={{ display:"flex",flexDirection:"column",gap:"12px" }}>
+
+            {/* Preview */}
+            <div style={{ padding:"10px 12px",background:f.color+"18",border:`1px solid ${f.color}44`,
+                          borderRadius:"4px",display:"flex",alignItems:"center",gap:"10px" }}>
+              <span style={{ fontSize:"20px",color:f.color }}>{f.icon}</span>
+              <div>
+                <div style={{ fontSize:"13px",color:f.color,fontWeight:"bold" }}>{f.name||"名前未設定"}</div>
+                <div style={{ fontSize:"10px",color:"#484f58" }}>{f.shortcut}</div>
+              </div>
+            </div>
+
+            {/* Icon picker */}
+            <div>
+              <label style={S.label}>アイコン</label>
+              <div style={{ display:"flex",gap:"5px",flexWrap:"wrap" }}>
+                {ICONS.map(ic=>(
+                  <button key={ic} onClick={()=>s("icon",ic)} style={{
+                    width:"34px",height:"34px",borderRadius:"4px",cursor:"pointer",fontSize:"15px",
+                    background:f.icon===ic?f.color+"33":"#0d1117",
+                    border:`1px solid ${f.icon===ic?f.color:"#21262d"}`,
+                    color:f.icon===ic?f.color:"#484f58"
+                  }}>{ic}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Color picker */}
+            <div>
+              <label style={S.label}>カラー</label>
+              <div style={{ display:"flex",gap:"6px",flexWrap:"wrap" }}>
+                {COLORS.map(c=>(
+                  <button key={c} onClick={()=>s("color",c)} style={{
+                    width:"26px",height:"26px",borderRadius:"50%",background:c,cursor:"pointer",
+                    border:`2px solid ${f.color===c?"#fff":"transparent"}`
+                  }}/>
+                ))}
+              </div>
+            </div>
+
+            {/* Text fields */}
+            {[
+              {k:"name",       label:"名前",         ph:"例: 法律の専門家",                ta:false},
+              {k:"shortcut",   label:"ショートカット", ph:"例: ctrl+4",                   ta:false},
+              {k:"systemPrompt",label:"カスタム指示", ph:"この専門家の役割・性格・制約を記述してください", ta:true, rows:4},
+              {k:"knowledge",  label:"ナレッジ（任意）",ph:"参照させたい知識・資料を貼り付けてください", ta:true, rows:3},
+            ].map(({k,label,ph,ta,rows})=>(
+              <div key={k}>
+                <label style={S.label}>{label}</label>
+                {ta
+                  ? <textarea value={f[k]} onChange={e=>s(k,e.target.value)} placeholder={ph} rows={rows}
+                      style={{...S.field,fontFamily:"sans-serif",lineHeight:1.5,resize:"vertical"}}/>
+                  : <input value={f[k]} onChange={e=>s(k,e.target.value)} placeholder={ph}
+                      style={{...S.field,fontFamily:"monospace"}}/>
+                }
+              </div>
+            ))}
+
+            <div style={{ display:"flex",gap:"8px",marginTop:"4px" }}>
+              <button onClick={()=>onSave(f)} style={S.btn()}>保存</button>
+              {onDelete && (
+                <button onClick={onDelete} style={{
+                  background:"transparent",border:"1px solid #ef444455",color:"#f87171",
+                  padding:"9px 14px",borderRadius:"3px",cursor:"pointer",
+                  fontSize:"12px",fontFamily:"monospace",flexShrink:0
+                }}>削除</button>
+              )}
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────────
+    function App() {
+      const [projects,   setProjects]   = useState(DEFAULTS);
+      const [convos,     setConvos]     = useState({});
+      const [activeId,   setActiveId]   = useState("p1");
+      const [input,      setInput]      = useState("");
+      const [sending,    setSending]    = useState(false);
+      const [apiKey,     setApiKey]     = useState("");
+      const [modal,      setModal]      = useState(null);
+      const [editTarget, setEditTarget] = useState(null);
+      const [sideOpen,   setSideOpen]   = useState(true);
+      const chatEndRef = useRef(null);
+      const inputRef   = useRef(null);
+
+      // Load from localStorage
+      useEffect(() => {
+        const ak = store.get("apikey");
+        const pr = store.get("projects");
+        const cv = store.get("convos");
+        if (ak) setApiKey(ak);
+        if (pr) try { setProjects(JSON.parse(pr)); } catch {}
+        if (cv) try { setConvos(JSON.parse(cv)); } catch {}
+        if (!ak) setModal("settings");
+      }, []);
+
+      useEffect(() => { store.set("projects", JSON.stringify(projects)); }, [projects]);
+      useEffect(() => { store.set("convos",   JSON.stringify(convos));   }, [convos]);
+      useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior:"smooth" }); }, [convos, activeId, sending]);
+
+      // Keyboard shortcuts
+      useEffect(() => {
+        const h = (e) => {
+          if ((e.ctrlKey||e.metaKey) && /^[1-9]$/.test(e.key)) {
+            const p = projects.find(x => x.shortcut===`ctrl+${e.key}`);
+            if (p) { e.preventDefault(); setActiveId(p.id); setTimeout(()=>inputRef.current?.focus(),80); }
+          }
+        };
+        window.addEventListener("keydown", h);
+        return () => window.removeEventListener("keydown", h);
+      }, [projects]);
+
+      const ap   = projects.find(p=>p.id===activeId) || projects[0];
+      const msgs = convos[activeId] || [];
+
+      const send = async () => {
+        if (!input.trim() || sending) return;
+        if (!apiKey) { setModal("settings"); return; }
+        const userMsg = { role:"user", content:input.trim() };
+        const next = [...msgs, userMsg];
+        setConvos(p=>({...p,[activeId]:next}));
+        setInput("");
+        setSending(true);
+        try {
+          const system = ap.systemPrompt + (ap.knowledge ? `\n\nナレッジ:\n${ap.knowledge}` : "");
+          const reply  = await callLLM(apiKey, system, next.map(m=>({role:m.role,content:m.content})));
+          setConvos(p=>({...p,[activeId]:[...next,{role:"assistant",content:reply}]}));
+        } catch(e) {
+          setConvos(p=>({...p,[activeId]:[...next,{role:"assistant",content:`エラー: ${e.message}`,err:true}]}));
+        }
+        setSending(false);
+      };
+
+      const saveProject = (f) => {
+        if (f.id) { setProjects(p=>p.map(x=>x.id===f.id?f:x)); }
+        else { const np={...f,id:`p${Date.now()}`}; setProjects(p=>[...p,np]); setActiveId(np.id); }
+        setModal(null); setEditTarget(null);
+      };
+      const delProject = (id) => {
+        setProjects(p=>p.filter(x=>x.id!==id));
+        setConvos(p=>{ const n={...p}; delete n[id]; return n; });
+        if (activeId===id) setActiveId(projects.find(p=>p.id!==id)?.id);
+        setModal(null); setEditTarget(null);
+      };
+
+      const usedShortcuts = projects.filter(p=>!editTarget||p.id!==editTarget.id).map(p=>p.shortcut);
+
+      return (
+        <div style={{ display:"flex", height:"100vh", background:"#0d1117", color:"#c9d1d9", overflow:"hidden" }}>
+
+          {/* ── Sidebar ── */}
+          {sideOpen && (
+            <div style={{ width:"190px",borderRight:"1px solid #21262d",display:"flex",flexDirection:"column",flexShrink:0 }}>
+              <div style={{ padding:"12px 10px",borderBottom:"1px solid #21262d",display:"flex",alignItems:"center",justifyContent:"space-between" }}>
+                <div>
+                  <div style={{ fontSize:"12px",fontWeight:"bold",letterSpacing:"0.1em",color:"#58a6ff" }}>⬡ EXPERT HUB</div>
+                  <div style={{ fontSize:"9px",color:"#484f58",marginTop:"1px" }}>shortcut engine · BYOK</div>
+                </div>
+                <button onClick={()=>setSideOpen(false)}
+                  style={{ background:"none",border:"none",color:"#484f58",cursor:"pointer",fontSize:"14px" }}>‹</button>
+              </div>
+
+              <div style={{ flex:1,overflowY:"auto",padding:"6px" }}>
+                {projects.map(p=>{
+                  const isActive = activeId===p.id;
+                  const hasMsg   = (convos[p.id]?.length||0)>0;
+                  return (
+                    <div key={p.id}
+                      onClick={()=>setActiveId(p.id)}
+                      style={{
+                        padding:"8px",borderRadius:"4px",marginBottom:"3px",cursor:"pointer",transition:"all 0.15s",
+                        background:isActive?p.color+"22":"transparent",
+                        border:`1px solid ${isActive?p.color+"55":"transparent"}`
+                      }}>
+                      <div style={{ display:"flex",alignItems:"center",gap:"7px" }}>
+                        <span style={{ color:p.color,fontSize:"15px",flexShrink:0 }}>{p.icon}</span>
+                        <div style={{ flex:1,minWidth:0 }}>
+                          <div style={{ fontSize:"11px",fontWeight:"bold",color:isActive?p.color:"#c9d1d9",
+                                        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>{p.name}</div>
+                          <div style={{ fontSize:"9px",color:"#484f58" }}>{p.shortcut}</div>
+                        </div>
+                        {hasMsg && <div style={{ width:"5px",height:"5px",borderRadius:"50%",background:p.color,flexShrink:0 }}/>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={{ padding:"6px",borderTop:"1px solid #21262d",display:"flex",flexDirection:"column",gap:"4px" }}>
+                <button onClick={()=>{ setEditTarget(null); setModal("project"); }} style={{
+                  background:"transparent",border:"1px solid #21262d",color:"#58a6ff",
+                  padding:"7px",borderRadius:"3px",cursor:"pointer",fontSize:"11px",fontFamily:"monospace"
+                }}>+ 専門家を追加</button>
+                <button onClick={()=>setModal("settings")} style={{
+                  background:"transparent",border:"1px solid #21262d",color:"#484f58",
+                  padding:"7px",borderRadius:"3px",cursor:"pointer",fontSize:"11px",fontFamily:"monospace",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:"6px"
+                }}>
+                  ⚙ 設定
+                  {!apiKey && <span style={{ color:"#f59e0b",fontSize:"10px" }}>● 未設定</span>}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Chat ── */}
+          <div style={{ flex:1,display:"flex",flexDirection:"column",overflow:"hidden" }}>
+
+            {/* Header */}
+            <div style={{ padding:"10px 14px",borderBottom:"1px solid #21262d",display:"flex",alignItems:"center",gap:"10px" }}>
+              {!sideOpen && (
+                <button onClick={()=>setSideOpen(true)}
+                  style={{ background:"none",border:"none",color:"#484f58",cursor:"pointer",fontSize:"14px",flexShrink:0 }}>›</button>
+              )}
+              <span style={{ color:ap?.color,fontSize:"18px",flexShrink:0 }}>{ap?.icon}</span>
+              <div style={{ flex:1,minWidth:0 }}>
+                <div style={{ fontSize:"13px",fontWeight:"bold",color:ap?.color }}>{ap?.name}</div>
+                <div style={{ fontSize:"10px",color:"#484f58",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
+                  {ap?.systemPrompt?.slice(0,72)}{ap?.systemPrompt?.length>72?"...":""}
+                </div>
+              </div>
+              <div style={{ display:"flex",gap:"5px",flexShrink:0 }}>
+                <button onClick={()=>{ setEditTarget(ap); setModal("project"); }} style={{
+                  background:"transparent",border:"1px solid #21262d",color:"#484f58",
+                  padding:"4px 8px",borderRadius:"3px",cursor:"pointer",fontSize:"10px",fontFamily:"monospace"
+                }}>編集</button>
+                <button onClick={()=>setConvos(p=>({...p,[activeId]:[]}))} style={{
+                  background:"transparent",border:"1px solid #21262d",color:"#484f58",
+                  padding:"4px 8px",borderRadius:"3px",cursor:"pointer",fontSize:"10px",fontFamily:"monospace"
+                }}>クリア</button>
+              </div>
+            </div>
+
+            {/* Messages */}
+            <div style={{ flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:"12px" }}>
+              {msgs.length===0 && (
+                <div style={{ textAlign:"center",padding:"50px 20px",color:"#21262d" }}>
+                  <div style={{ fontSize:"40px",marginBottom:"10px",color:ap?.color+"44" }}>{ap?.icon}</div>
+                  <div style={{ fontSize:"12px",letterSpacing:"0.06em",color:"#30363d" }}>{ap?.name} と話す</div>
+                  <div style={{ fontSize:"10px",marginTop:"6px",color:"#21262d" }}>
+                    {ap?.shortcut} でいつでもここへ切り替え
+                  </div>
+                </div>
+              )}
+              {msgs.map((m,i)=>(
+                <div key={i} style={{ display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",animation:"fadeIn 0.2s ease" }}>
+                  <div style={{
+                    maxWidth:"80%",padding:"10px 14px",borderRadius:"6px",
+                    fontSize:"13px",lineHeight:"1.65",fontFamily:"sans-serif",whiteSpace:"pre-wrap",
+                    background:m.role==="user"?ap?.color+"2a":"#161b22",
+                    border:`1px solid ${m.role==="user"?ap?.color+"44":"#21262d"}`,
+                    color:m.err?"#f87171":"#c9d1d9"
+                  }}>{m.content}</div>
+                </div>
+              ))}
+              {sending && (
+                <div style={{ display:"flex",justifyContent:"flex-start" }}>
+                  <div style={{ padding:"10px 14px",borderRadius:"6px",background:"#161b22",
+                                border:"1px solid #21262d",fontSize:"12px",color:"#484f58" }}>
+                    <span style={{ display:"inline-block",animation:"spin 1.2s linear infinite" }}>◌</span>  考え中...
+                  </div>
+                </div>
+              )}
+              <div ref={chatEndRef}/>
+            </div>
+
+            {/* Input area */}
+            <div style={{ padding:"12px 14px",borderTop:"1px solid #21262d" }}>
+              {!apiKey && (
+                <div onClick={()=>setModal("settings")} style={{
+                  marginBottom:"8px",padding:"7px 10px",background:"#1c150033",
+                  border:"1px solid #f59e0b44",borderRadius:"3px",
+                  fontSize:"11px",color:"#f59e0b",cursor:"pointer"
+                }}>⚠ APIキー未設定 — タップして設定する</div>
+              )}
+              <div style={{ display:"flex",gap:"8px" }}>
+                <textarea ref={inputRef} value={input} rows={2} disabled={sending}
+                  onChange={e=>setInput(e.target.value)}
+                  onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); send(); } }}
+                  placeholder={`${ap?.name} に送信... (Enter で送信)`}
+                  style={{ flex:1,background:"#161b22",border:"1px solid #30363d",color:"#c9d1d9",
+                           fontFamily:"sans-serif",fontSize:"13px",padding:"8px 12px",
+                           borderRadius:"4px",resize:"none",lineHeight:1.55,
+                           opacity:sending?0.6:1 }}/>
+                <button onClick={send} disabled={sending||!input.trim()} style={{
+                  background:sending?"#21262d":ap?.color+"33",
+                  border:`1px solid ${sending?"#21262d":ap?.color+"55"}`,
+                  color:sending?"#484f58":ap?.color,
+                  padding:"8px 14px",borderRadius:"4px",
+                  cursor:sending?"not-allowed":"pointer",
+                  fontSize:"12px",fontFamily:"monospace",fontWeight:"bold",
+                  alignSelf:"flex-end",transition:"all 0.15s",flexShrink:0
+                }}>{sending?"...":"送信"}</button>
+              </div>
+              <div style={{ marginTop:"5px",fontSize:"9px",color:"#21262d",
+                            whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis" }}>
+                {projects.map(p=>`${p.shortcut}: ${p.name}`).join("  ·  ")}
+              </div>
+            </div>
+          </div>
+
+          {/* Modals */}
+          {modal==="settings" && (
+            <SettingsModal apiKey={apiKey} onClose={()=>setModal(null)}
+              onSave={k=>{ setApiKey(k); store.set("apikey",k); setModal(null); }}/>
+          )}
+          {modal==="project" && (
+            <ProjectModal
+              project={editTarget} usedShortcuts={usedShortcuts}
+              onSave={saveProject}
+              onDelete={editTarget ? ()=>delProject(editTarget.id) : null}
+              onClose={()=>{ setModal(null); setEditTarget(null); }}/>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js")
+          .then(r => console.log("SW registered:", r.scope))
+          .catch(e => console.log("SW error:", e));
+      });
+    }
+  </script>
+</body>
+</html>
