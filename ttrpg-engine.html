@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0d1117">
+  <title>TTRPG Engine</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #0d1117; font-family: 'Courier New', monospace; color: #c9d1d9; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0d1117; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+    textarea:focus, input:focus { outline: none !important; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes glow { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  </style>
+</head>
+<body>
+<div id="root">
+  <div style="padding:24px;color:#8b949e;font-size:13px;text-align:center;">
+    読み込み中... (これが消えない場合はJS読み込みエラーです)
+  </div>
+</div>
+<div id="error-box" style="display:none;position:fixed;top:0;left:0;right:0;background:#3d0a0a;color:#fca5a5;padding:14px;font-family:monospace;font-size:12px;white-space:pre-wrap;z-index:9999;border-bottom:2px solid #f87171;"></div>
+
+<script>
+  window.onerror = function(msg, url, line, col, error) {
+    const box = document.getElementById('error-box');
+    box.style.display = 'block';
+    box.textContent = 'JSエラー: ' + msg + ' (line ' + line + ')\n' + (error && error.stack ? error.stack.slice(0,300) : '');
+    return false;
+  };
+</script>
+
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" onerror="document.getElementById('error-box').style.display='block';document.getElementById('error-box').textContent='React の読み込みに失敗しました（ネットワーク/CDNブロックの可能性）';"></script>
+<script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" onerror="document.getElementById('error-box').style.display='block';document.getElementById('error-box').textContent='ReactDOM の読み込みに失敗しました（ネットワーク/CDNブロックの可能性）';"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.28.4/babel.min.js"></script>
+<script>
+  if (typeof React === "undefined" || typeof ReactDOM === "undefined") {
+    document.getElementById('error-box').style.display='block';
+    document.getElementById('error-box').textContent = 'React/ReactDOM が読み込めませんでした。ページを再読み込みしてください。(typeof React=' + typeof React + ', typeof ReactDOM=' + typeof ReactDOM + ')';
+  }
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }
+};
+
+async function callLLM(apiKey, system, messages) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 1024,
+      system,
+      messages
+    })
+  });
+  const d = await res.json();
+  if (d.error) throw new Error(d.error.message);
+  return d.content[0]?.text || "";
+}
+
+// ── SettingsModal ─────────────────────────────────────────────
+function SettingsModal({ apiKey, onSave, onClose }) {
+  const [k, setK] = useState(apiKey);
+  return (
+    <div onClick={e=>e.target===e.currentTarget&&onClose()}
+      style={{position:"fixed",inset:0,background:"#000000bb",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"16px"}}>
+      <div style={{background:"#161b22",border:"1px solid #30363d",borderRadius:"6px",padding:"20px",width:"100%",maxWidth:"400px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:"16px"}}>
+          <span style={{fontSize:"13px",fontWeight:"bold",color:"#c9d1d9"}}>⚙ 設定</span>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"#484f58",cursor:"pointer",fontSize:"18px"}}>✕</button>
+        </div>
+        <label style={{fontSize:"11px",color:"#8b949e",display:"block",marginBottom:"4px"}}>Anthropic API キー</label>
+        <input type="password" value={k} onChange={e=>setK(e.target.value)} placeholder="sk-ant-..."
+          style={{width:"100%",background:"#0d1117",border:"1px solid #30363d",color:"#c9d1d9",padding:"8px 10px",borderRadius:"3px",fontFamily:"monospace",fontSize:"12px",marginBottom:"12px"}}/>
+        <button onClick={()=>{ store.set("apikey",k); onSave(k); onClose(); }}
+          style={{width:"100%",background:"#1f6feb",border:"none",color:"#fff",padding:"9px",borderRadius:"3px",cursor:"pointer",fontSize:"12px",fontFamily:"monospace"}}>
+          保存して閉じる
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────
+function App() {
+  const [apiKey,    setApiKey]    = useState("");
+  const [scenario,  setScenario]  = useState(null);
+  const [messages,  setMessages]  = useState([]);
+  const [input,     setInput]     = useState("");
+  const [sending,   setSending]   = useState(false);
+  const [jsonUrl,   setJsonUrl]   = useState("");
+  const [loading,   setLoading]   = useState(false);
+  const [error,     setError]     = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const [phase,     setPhase]     = useState("load"); // load | play
+  const chatEndRef = useRef(null);
+  const inputRef   = useRef(null);
+
+  useEffect(() => {
+    const k = store.get("apikey");
+    if (k) setApiKey(k);
+    const lastUrl = store.get("lastScenarioUrl");
+    if (lastUrl) setJsonUrl(lastUrl);
+  }, []);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior:"smooth" });
+  }, [messages, sending]);
+
+  const loadScenario = async () => {
+    if (!jsonUrl.trim()) return;
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(jsonUrl.trim());
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setScenario(data);
+      store.set("lastScenarioUrl", jsonUrl.trim());
+      // opening メッセージを最初に表示
+      setMessages([{ role:"assistant", content: data.opening || "冒険が始まる..." }]);
+      setPhase("play");
+    } catch(e) {
+      setError(`読み込みエラー: ${e.message}`);
+    }
+    setLoading(false);
+  };
+
+  const buildSystem = () => {
+    if (!scenario) return "";
+    let sys = `${scenario.gm_instruction}\n\n`;
+    sys += `【世界観】\n${scenario.world}\n\n`;
+    if (scenario.characters?.length > 0) {
+      sys += `【登場人物】\n`;
+      scenario.characters.forEach(c => {
+        sys += `・${c.name}（${c.role}）: ${c.description}\n`;
+      });
+    }
+    return sys;
+  };
+
+  const send = async (text) => {
+    const content = text || input.trim();
+    if (!content || sending) return;
+    if (!apiKey) { setShowSettings(true); return; }
+
+    const userMsg = { role:"user", content };
+    const next = [...messages, userMsg];
+    setMessages(next);
+    setInput("");
+    setSending(true);
+
+    try {
+      const reply = await callLLM(
+        apiKey,
+        buildSystem(),
+        next.map(m => ({ role:m.role, content:m.content }))
+      );
+      setMessages(p => [...p, { role:"assistant", content:reply }]);
+    } catch(e) {
+      setMessages(p => [...p, { role:"assistant", content:`エラー: ${e.message}`, err:true }]);
+    }
+    setSending(false);
+  };
+
+  const reset = () => {
+    setPhase("load");
+    setScenario(null);
+    setMessages([]);
+    setError("");
+  };
+
+  // ── Load Phase ───────────────────────────────────────────────
+  if (phase === "load") return (
+    <div style={{minHeight:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px"}}>
+      <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}`}</style>
+
+      {/* Header */}
+      <div style={{textAlign:"center",marginBottom:"32px",animation:"fadeIn 0.4s ease"}}>
+        <div style={{fontSize:"40px",marginBottom:"8px"}}>⬟</div>
+        <div style={{fontSize:"16px",fontWeight:"bold",letterSpacing:"0.12em",color:"#c9d1d9"}}>TTRPG ENGINE</div>
+        <div style={{fontSize:"10px",color:"#484f58",marginTop:"4px",letterSpacing:"0.1em"}}>JSON-driven · LLM-powered</div>
+      </div>
+
+      {/* URL Input */}
+      <div style={{width:"100%",maxWidth:"480px",animation:"fadeIn 0.4s ease 0.1s both"}}>
+        <label style={{fontSize:"11px",color:"#8b949e",display:"block",marginBottom:"6px"}}>シナリオJSON のURL</label>
+        <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
+          <input value={jsonUrl} onChange={e=>setJsonUrl(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&loadScenario()}
+            placeholder="https://example.github.io/scenario.json"
+            style={{flex:1,background:"#161b22",border:"1px solid #30363d",color:"#c9d1d9",
+                    padding:"10px 12px",borderRadius:"4px",fontFamily:"monospace",fontSize:"12px"}}/>
+          <button onClick={loadScenario} disabled={loading||!jsonUrl.trim()}
+            style={{background:loading?"#21262d":"#1f6feb",border:"none",color:loading?"#484f58":"#fff",
+                    padding:"10px 16px",borderRadius:"4px",cursor:loading?"not-allowed":"pointer",
+                    fontSize:"12px",fontFamily:"monospace",fontWeight:"bold",whiteSpace:"nowrap"}}>
+            {loading ? "⟳" : "読み込む"}
+          </button>
+        </div>
+        {error && <div style={{fontSize:"11px",color:"#f87171",padding:"6px 10px",background:"#160909",border:"1px solid #ef444433",borderRadius:"3px"}}>{error}</div>}
+
+        {/* Demo URL hint */}
+        <div style={{marginTop:"16px",padding:"12px",background:"#161b22",border:"1px solid #21262d",borderRadius:"4px"}}>
+          <div style={{fontSize:"10px",color:"#484f58",marginBottom:"6px"}}>テスト用URL（Expert Hubリポジトリに追加後）</div>
+          <div style={{fontSize:"11px",color:"#58a6ff",fontFamily:"monospace",wordBreak:"break-all"}}>
+            https://higemohi109-svg.github.io/expert-hub/scenario-hajimari.json
+          </div>
+        </div>
+      </div>
+
+      {/* Settings */}
+      <button onClick={()=>setShowSettings(true)}
+        style={{marginTop:"24px",background:"transparent",border:"1px solid #21262d",color:apiKey?"#484f58":"#f59e0b",
+                padding:"7px 14px",borderRadius:"3px",cursor:"pointer",fontSize:"11px",fontFamily:"monospace"}}>
+        ⚙ 設定 {!apiKey && "● APIキー未設定"}
+      </button>
+
+      {showSettings && <SettingsModal apiKey={apiKey} onSave={setApiKey} onClose={()=>setShowSettings(false)}/>}
+    </div>
+  );
+
+  // ── Play Phase ───────────────────────────────────────────────
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100vh"}}>
+      <style>{`
+        @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+      `}</style>
+
+      {/* Header */}
+      <div style={{padding:"10px 14px",borderBottom:"1px solid #21262d",display:"flex",alignItems:"center",gap:"10px"}}>
+        <span style={{fontSize:"18px",color:"#a855f7"}}>⬟</span>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:"13px",fontWeight:"bold",color:"#a855f7"}}>{scenario?.meta?.title || "シナリオ"}</div>
+          <div style={{fontSize:"10px",color:"#484f58",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+            {scenario?.world?.slice(0,60)}...
+          </div>
+        </div>
+        <div style={{display:"flex",gap:"5px"}}>
+          <button onClick={()=>setShowSettings(true)}
+            style={{background:"transparent",border:"1px solid #21262d",color:"#484f58",padding:"4px 8px",borderRadius:"3px",cursor:"pointer",fontSize:"10px",fontFamily:"monospace"}}>
+            ⚙
+          </button>
+          <button onClick={reset}
+            style={{background:"transparent",border:"1px solid #21262d",color:"#484f58",padding:"4px 8px",borderRadius:"3px",cursor:"pointer",fontSize:"10px",fontFamily:"monospace"}}>
+            ↩ 戻る
+          </button>
+        </div>
+      </div>
+
+      {/* Messages */}
+      <div style={{flex:1,overflowY:"auto",padding:"16px",display:"flex",flexDirection:"column",gap:"12px"}}>
+        {messages.map((m,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start",animation:"fadeIn 0.2s ease"}}>
+            {m.role==="assistant" && (
+              <div style={{width:"28px",height:"28px",borderRadius:"50%",background:"#a855f722",border:"1px solid #a855f744",
+                           display:"flex",alignItems:"center",justifyContent:"center",fontSize:"13px",flexShrink:0,marginRight:"8px",alignSelf:"flex-end"}}>
+                ⬟
+              </div>
+            )}
+            <div style={{
+              maxWidth:"82%",padding:"10px 14px",borderRadius:"6px",
+              fontSize:"13px",lineHeight:"1.7",fontFamily:"sans-serif",whiteSpace:"pre-wrap",
+              background:m.role==="user"?"#a855f722":"#161b22",
+              border:`1px solid ${m.role==="user"?"#a855f744":"#21262d"}`,
+              color:m.err?"#f87171":"#c9d1d9"
+            }}>{m.content}</div>
+          </div>
+        ))}
+
+        {sending && (
+          <div style={{display:"flex",alignItems:"flex-end",gap:"8px"}}>
+            <div style={{width:"28px",height:"28px",borderRadius:"50%",background:"#a855f722",border:"1px solid #a855f744",
+                         display:"flex",alignItems:"center",justifyContent:"center",fontSize:"13px"}}>⬟</div>
+            <div style={{padding:"10px 14px",borderRadius:"6px",background:"#161b22",border:"1px solid #21262d",fontSize:"12px",color:"#484f58"}}>
+              <span style={{display:"inline-block",animation:"spin 1.2s linear infinite"}}>◌</span>  考え中...
+            </div>
+          </div>
+        )}
+        <div ref={chatEndRef}/>
+      </div>
+
+      {/* Action buttons */}
+      {!sending && scenario?.player_options && (
+        <div style={{padding:"8px 14px",borderTop:"1px solid #21262d",display:"flex",flexWrap:"wrap",gap:"6px"}}>
+          {scenario.player_options.map((opt,i)=>(
+            <button key={i} onClick={()=>send(opt)}
+              style={{background:"#a855f722",border:"1px solid #a855f744",color:"#c084fc",
+                      padding:"6px 12px",borderRadius:"3px",cursor:"pointer",fontSize:"12px",fontFamily:"sans-serif"}}>
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input */}
+      <div style={{padding:"10px 14px",borderTop:"1px solid #21262d"}}>
+        {!apiKey && (
+          <div onClick={()=>setShowSettings(true)}
+            style={{marginBottom:"8px",padding:"6px 10px",background:"#1c150033",border:"1px solid #f59e0b44",
+                    borderRadius:"3px",fontSize:"11px",color:"#f59e0b",cursor:"pointer"}}>
+            ⚠ APIキー未設定 — タップして設定する
+          </div>
+        )}
+        <div style={{display:"flex",gap:"8px"}}>
+          <textarea ref={inputRef} value={input} rows={2} disabled={sending}
+            onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>{ if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); send(); } }}
+            placeholder="自由に行動を入力... または上のボタンを選択"
+            style={{flex:1,background:"#161b22",border:"1px solid #30363d",color:"#c9d1d9",
+                    fontFamily:"sans-serif",fontSize:"13px",padding:"8px 12px",
+                    borderRadius:"4px",resize:"none",lineHeight:1.55}}/>
+          <button onClick={()=>send()} disabled={sending||!input.trim()}
+            style={{background:sending?"#21262d":"#a855f733",border:`1px solid ${sending?"#21262d":"#a855f755"}`,
+                    color:sending?"#484f58":"#c084fc",padding:"8px 14px",borderRadius:"4px",
+                    cursor:sending?"not-allowed":"pointer",fontSize:"12px",fontFamily:"monospace",
+                    fontWeight:"bold",alignSelf:"flex-end"}}>
+            {sending?"...":"送信"}
+          </button>
+        </div>
+      </div>
+
+      {showSettings && <SettingsModal apiKey={apiKey} onSave={setApiKey} onClose={()=>setShowSettings(false)}/>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
